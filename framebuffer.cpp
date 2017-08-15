@@ -88,7 +88,7 @@ int main()
     //create and compile our shaders
     Shader shader("Shaders/Shader.vs", "Shaders/Shader.fs");
     //need a second shader for the outline, with the same vertex shader, but fragment shader that creates a static color.
-    Shader shaderSingleColor("Shaders/Shader.vs", "Shaders/outlineShader.fs");
+    Shader postShader("Shaders/FrameBufferShader.vs", "Shaders/FrameBufferShader.fs");
 
     //set up the vertices for a cube
     float cubeVertices[] = {
@@ -156,13 +156,16 @@ int main()
         1.0f, -0.5f,  0.0f,  1.0f,  1.0f,
         1.0f,  0.5f,  0.0f,  1.0f,  0.0f
     };
-    //coordinates for the transparent objects
-    std::vector<glm::vec3> screens;
-    screens.push_back(glm::vec3(-1.5f,  0.0f, -0.48f));
-    screens.push_back(glm::vec3( 1.5f,  0.0f,  0.51f));
-    screens.push_back(glm::vec3( 0.0f,  0.0f,  0.7f));
-    screens.push_back(glm::vec3(-0.3f,  0.0f, -2.3f));
-    screens.push_back(glm::vec3( 0.5f,  0.0f, -0.6f));  
+    float postVertices[] = {
+        // positions   // texCoords
+        -1.0f,  1.0f,  0.0f, 1.0f,
+        -1.0f, -1.0f,  0.0f, 0.0f,
+         1.0f, -1.0f,  1.0f, 0.0f,
+
+        -1.0f,  1.0f,  0.0f, 1.0f,
+         1.0f, -1.0f,  1.0f, 0.0f,
+         1.0f,  1.0f,  1.0f, 1.0f
+    };
     // cube VAO
     unsigned int cubeVAO, cubeVBO;
     glGenVertexArrays(1, &cubeVAO);
@@ -199,22 +202,58 @@ int main()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5*sizeof(float), (void *)(3*sizeof(float)));
     glBindVertexArray(0);
-
+    //post-processing VAO
+    unsigned int postVAO, postVBO;
+    glGenVertexArrays(1, &postVAO);
+    glGenBuffers(1, &postVBO);
+    glBindVertexArray(postVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, postVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(postVertices), postVertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void *)(2*sizeof(float)));
+    //make a frame buffer
+    unsigned int FrameBuffer;
+    glGenFrameBuffers(1, &FrameBuffer);
+    glBindFrameBuffer(GL_FRAMEBUFFER, FrameBuffer);
+    //create and add colored texture to frame buffer
+    unsigned int TexColorBuffer;
+    glGenTexures(1, &TexColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, TexColorBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLORATTACHEMENT0, GL_TEXTURE_2D, TexColorBuffer, 0);
+    //making a render buffer
+    unsigned int rbo;
+    glGenRenderBuffers(1, &rbo);
+    glBindRenderBuffer(GL_RENDERBUFFER, rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, SCR_WIDTH, SCR_HEIGHT);
     
+
+
 
 
     // load textures
     unsigned int cubeTexture = loadTexture("Other/marble.jpg");
     unsigned int floorTexture = loadTexture("Other/metal.png");
-    unsigned int screenTexture = loadTexture("Other/blending_transparent_window.png");
 
     // shader configuration
     shader.use();
     shader.setInt("texture1", 0);
 
+    postShader.use();
+    postShader.setInt("FrameBufferTexture", 0);
+
     // render loop
     while (!glfwWindowShouldClose(window))
     {
+        /* using old stuff for the sake of this program.
+         * transparent images and outlines are being removed.
+         * adding frame buffer so that we can use post processing.
+         */
+
         //per-frame time logic
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
@@ -223,17 +262,9 @@ int main()
         //input
         processInput(window);
 
-        //sort the screens from furthest to closest so that areas of the screens will not be discarded through depth test
-        std::map<float, glm::vec3> sortedScreens;
-        for(int i = 0; i < screens.size(); i++){
-            float distance = glm::length(camera.Position - screens[i]);
-            sortedScreens[distance] = screens[i];
-        }
-
         //render
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        //need to add depth buffer and stencil buffer bit 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT); 
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); 
 
         //set tranformation matrices for the vertex shaders
         shaderSingleColor.use();
@@ -247,16 +278,6 @@ int main()
         shader.setMat4("view", view);
         shader.setMat4("projection", projection);
 
-        //so the general idea of what we are about to do is set the stencil mask to 0xFF
-        //before drawing our cubes using the first shader, making it apear at normal size
-        //using the loaded textures. then we set our stencil mask to 0x00 and redraw the cube
-        //using the second shader and scaling the object up, so that it outlines the original cube.
-        //since the first cube passes the stencil test and the first fails,
-        //the first cube will always be shown in priority to the second.
-        //This should create a nice outline to the cube. 
-
-        //the floor needs to be drawn, but leave it out of the stencil mask.
-        glStencilMask(0x00);
         // floor
         glBindVertexArray(planeVAO);
         glBindTexture(GL_TEXTURE_2D, floorTexture);
@@ -264,11 +285,6 @@ int main()
         shader.setMat4("model", glm::mat4());
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
-
-        // 1st. render pass, draw objects as normal, writing to the stencil buffer
-        glStencilFunc(GL_ALWAYS, 1, 0xFF);
-        glStencilMask(0xFF);
-        //screens
         
 
         // cubes
@@ -285,49 +301,9 @@ int main()
         shader.setMat4("model", model);
         glDrawArrays(GL_TRIANGLES, 0, 36);
 
-        
-        //draw screens last so it doesn't blow up the planet
-        glBindVertexArray(screenVAO);
-        glBindTexture(GL_TEXTURE_2D, screenTexture);
-        //draw in order from furthest to closest and apply transformations
-        for(std::map<float, glm::vec3>::reverse_iterator it = sortedScreens.rbegin(); it != sortedScreens.rend(); ++it){
-            model = glm::mat4();
-            model = glm::translate(model, it->second);
-            shader.setMat4("model", model);
-            glDrawArrays(GL_TRIANGLES, 0, 6);
-        }
-
-        // 2nd. render pass: now draw slightly scaled versions of the objects, this time disabling stencil writing.
-        // Because the stencil buffer is now filled with several 1s. The parts of the buffer that are 1 are not drawn, thus only drawing 
-        // the objects' size differences, making it look like borders.
-        // -----------------------------------------------------------------------------------------------------------------------------
-        glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
-        glStencilMask(0x00);
-        glDisable(GL_DEPTH_TEST);
-        shaderSingleColor.use();
-        float scale = 1.1;
-        // cubes
-        glBindVertexArray(cubeVAO);
-        glBindTexture(GL_TEXTURE_2D, cubeTexture);
-        model = glm::mat4();
-        model = glm::translate(model, glm::vec3(-1.0f, 0.0f, -1.0f));
-        model = glm::scale(model, glm::vec3(scale, scale, scale));
-        shaderSingleColor.setMat4("model", model);
-        glDrawArrays(GL_TRIANGLES, 0, 36);
-        model = glm::mat4();
-        model = glm::translate(model, glm::vec3(2.0f, 0.0f, 0.0f));
-        model = glm::scale(model, glm::vec3(scale, scale, scale));
-        shaderSingleColor.setMat4("model", model);
-        
-        //additional thing I'm adding for the fun of it
-        //making the outline of the object change color over time
-        float colorChange = 0.5f + (sin(currentFrame) * 0.5f);
-        shaderSingleColor.setFloat("time", colorChange);
-
         glDrawArrays(GL_TRIANGLES, 0, 36);
         glBindVertexArray(0);
-        glStencilMask(0xFF);
-        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_DEPTH_TEST);
 
 
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
